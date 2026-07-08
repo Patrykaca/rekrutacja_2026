@@ -38,5 +38,6 @@ jobs:
       - name: Validate shell scripts
         run: |
           bash -n bash_env.sh
+          bash -n cleanup.sh
           bash -n smoke_test.sh
-          shellcheck bash_env.sh smoke_test.sh
+          shellcheck bash_env.sh cleanup.sh smoke_test.sh

@@ -67,6 +67,7 @@ tests/
   test_parser.py
 
 bash_env.sh                # GCP setup/deploy/test helper
+cleanup.sh                 # GCP resource cleanup helper
 smoke_test.sh              # GCP end-to-end smoke test helper
 ```
 
@@ -169,6 +170,20 @@ Keep existing BigQuery data while still resetting the rest:
 
 ```bash
 PROJECT_ID="your-project-id" RESET_BIGQUERY_DATASET=false bash bash_env.sh
+```
+
+Remove deployed resources:
+
+```bash
+PROJECT_ID="your-project-id" bash cleanup.sh
+```
+
+The cleanup script deletes the Pub/Sub subscriptions and topics, Cloud Run service, BigQuery dataset and Cloud Run source Artifact Registry package. It keeps service accounts by default because they do not store data and can be reused by the next deploy.
+
+Remove the service accounts as well:
+
+```bash
+PROJECT_ID="your-project-id" DELETE_SERVICE_ACCOUNTS=true bash cleanup.sh
 ```
 
 Default values can be overridden:
@@ -292,7 +307,7 @@ gcloud pubsub subscriptions pull synthetic-data-generator-dlq-pull-sub \
 ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────┼──────────────┼───────────────────────────────────────────────────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ {"id":"not-a-uuid","name":"Bad product","is_in_stock":"true","price":"10.50","last_update":"Mon, 17 Jun 2024 13:47:16 UTC","attributes":[]} │ 19816684617978589 │              │ CloudPubSubDeadLetterSourceDeliveryCount=5                                │                  │ ***-MD5F                                                                                                                                                                                         │
 │                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceSubscription=synthetic-data-generator-push-sub │                  │                                                                                                                                                                                                  │
-│                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceSubscriptionProject=rekrutacaj-2026            │                  │                                                                                                                                                                                                  │
+│                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceSubscriptionProject=****            │                  │                                                                                                                                                                                                             │
 │                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceTopicPublishTime=2026-07-08T01:35:28.132+00:00 │                  │                                                                                                                                                                                                  │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────────────────┴──────────────┴───────────────────────────────────────────────────────────────────────────┴──────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
