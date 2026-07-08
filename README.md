@@ -221,22 +221,15 @@ PROJECT_ID="your-project-id" CHECK_DLQ=false bash smoke_test.sh
 
 ## Verified E2E
 
-Fill this section after running the deployed pipeline:
-
-```text
-Date:
-Project:
-Valid message id:
-BigQuery row found: yes/no
-Invalid payload routed to DLQ: yes/no
-```
 
 Publish a valid sample message:
 
 ```bash
 gcloud pubsub topics publish synthetic-data-generator \
-  --project=YOUR_PROJECT_ID \
+  --project=**** \
   --message="$(cat sample/sample.json)"
+messageIds:
+- '20327292732787353'
 ```
 
 Read Cloud Run logs:
@@ -245,6 +238,14 @@ Read Cloud Run logs:
 gcloud run services logs read pubsub-to-bq-products \
   --region=us-east1 \
   --limit=50
+(...)
+2026-07-08 01:31:15 POST 204 https://pubsub-to-bq-products-***-ue.a.run.app/pubsub/push
+2026-07-08 01:31:20 INFO:     Started server process [1]
+2026-07-08 01:31:20 INFO:     Waiting for application startup.
+2026-07-08 01:31:20 INFO:     Application startup complete.
+2026-07-08 01:31:20 INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+2026-07-08 01:31:20 INFO:app.main:Product stored message_id=20327292732787353 invoker=pubsub-push@****.iam.gserviceaccount.com
+2026-07-08 01:31:20 INFO:     169.254.169.126:2644 - "POST /pubsub/push HTTP/1.1" 204 No Content
 ```
 
 Successful processing looks like:
@@ -259,32 +260,49 @@ Query BigQuery:
 ```bash
 bq query --use_legacy_sql=false \
 'SELECT id, name, price, _source_message_id, _insert_timestamp
- FROM `YOUR_PROJECT_ID.product_ds.products_raw`
+ FROM `****.product_ds.products_raw`
  ORDER BY _insert_timestamp DESC
  LIMIT 10'
++--------------------------------------+---------------+--------+--------------------+---------------------+
+|                  id                  |     name      | price  | _source_message_id |  _insert_timestamp  |
++--------------------------------------+---------------+--------+--------------------+---------------------+
+| 57b2d226-4e29-4d00-a7cb-663a81d42229 | asWWKWUogiEJS | 873.06 | 20327292732787353  | 2026-07-08 01:31:20 |
+| 57b2d226-4e29-4d00-a7cb-663a81d42229 | asWWKWUogiEJS | 873.06 | 19816095545837601  | 2026-07-08 00:52:00 |
++--------------------------------------+---------------+--------+--------------------+---------------------+
 ```
 
 Test DLQ with an invalid message:
 
 ```bash
 gcloud pubsub topics publish synthetic-data-generator \
-  --project=YOUR_PROJECT_ID \
+  --project=**** \
   --message='{"id":"not-a-uuid","name":"Bad product","is_in_stock":"true","price":"10.50","last_update":"Mon, 17 Jun 2024 13:47:16 UTC","attributes":[]}'
+messageIds:
+- '19817156180660593'
 ```
 
 Inspect DLQ:
 
 ```bash
 gcloud pubsub subscriptions pull synthetic-data-generator-dlq-pull-sub \
-  --project=YOUR_PROJECT_ID \
+  --project=**** \
   --limit=10
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬───────────────────┬──────────────┬───────────────────────────────────────────────────────────────────────────┬──────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                     DATA                                                                    │     MESSAGE_ID    │ ORDERING_KEY │                                 ATTRIBUTES                                │ DELIVERY_ATTEMPT │                                                                                              ACK_ID                                                                                              │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────┼──────────────┼───────────────────────────────────────────────────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ {"id":"not-a-uuid","name":"Bad product","is_in_stock":"true","price":"10.50","last_update":"Mon, 17 Jun 2024 13:47:16 UTC","attributes":[]} │ 19816684617978589 │              │ CloudPubSubDeadLetterSourceDeliveryCount=5                                │                  │ ***-MD5F                                                                                                                                                                                         │
+│                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceSubscription=synthetic-data-generator-push-sub │                  │                                                                                                                                                                                                  │
+│                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceSubscriptionProject=rekrutacaj-2026            │                  │                                                                                                                                                                                                  │
+│                                                                                                                                             │                   │              │ CloudPubSubDeadLetterSourceTopicPublishTime=2026-07-08T01:35:28.132+00:00 │                  │                                                                                                                                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────────────────┴──────────────┴───────────────────────────────────────────────────────────────────────────┴──────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
 ```
 
 Clean DLQ after inspection:
 
 ```bash
 gcloud pubsub subscriptions pull synthetic-data-generator-dlq-pull-sub \
-  --project=YOUR_PROJECT_ID \
+  --project=*** \
   --auto-ack \
   --limit=1000
 ```
@@ -325,12 +343,23 @@ Usually BigQuery permission, schema mismatch, environment variable or transient 
 
 `products_raw` is append-only. The service stores every valid product event and does not update existing BigQuery rows.
 
+## Challenges
+
+The main challenge was getting familiar with the GCP services used in the pipeline and understanding how they fit together: Pub/Sub, Cloud Run, OIDC authentication, IAM and BigQuery.
+
+Another challenge was deciding how to handle invalid messages. I chose not to insert invalid payloads into BigQuery. Instead, the service returns a non-2xx response so Pub/Sub retries the message and eventually moves it to the DLQ.
+
+Cloud Run authentication also required care because there are two layers: Cloud Run IAM must allow the Pub/Sub push service account to invoke the service, and the application validates the OIDC token to make sure the request comes from the expected service account.
+
 ## Future Improvements
 
 - Manage GCP resources with Terraform for clearer infrastructure diffs and safer updates.
 - Add alerting for Cloud Run 5xx responses, Pub/Sub DLQ growth and BigQuery insert failures.
 - Add an analytical current-state view that deduplicates by product id and latest `last_update`.
 - Replace best-effort BigQuery `insertId` deduplication with an explicit idempotency table if exactly-once semantics become required.
+- Add stronger duplicate handling, for example by storing processed message ids or creating a deduplicated downstream table.
+- Add product change tracking, for example detecting price, stock or attribute changes between product events.
+- Add more automated and manual test scenarios for malformed payloads, duplicate deliveries and larger messages.
 
 ## Known Limitations
 
