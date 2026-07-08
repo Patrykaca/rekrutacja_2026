@@ -1,5 +1,7 @@
 # Product Data Ingestion Pipeline
 
+![CI](https://github.com/Patrykaca/rekrutacja_2026/actions/workflows/ci.yml/badge.svg)
+
 Small GCP ingestion service for Pub/Sub product events.
 
 ## Architecture
@@ -20,6 +22,14 @@ Invalid messages
 
 The service validates and normalizes incoming product payloads before inserting them into BigQuery. Valid messages are acknowledged only after the BigQuery insert succeeds.
 
+## Assumptions
+
+- The source system publishes messages to the `synthetic-data-generator` Pub/Sub topic using the product JSON structure from the assignment.
+- Product events are stored append-only. The pipeline does not update or delete previous product rows.
+- `description` can be null in BigQuery, although the assignment generator normally sends it as a string.
+- Pub/Sub redelivery is possible, so the Pub/Sub message id is used as BigQuery `insertId` for best-effort deduplication.
+- The external assignment publisher service account is `data-office-assignment@kramp-data-office-sandbox.iam.gserviceaccount.com`.
+
 ## Main Decisions
 
 - One BigQuery table stores valid product events: `product_ds.products_raw`.
@@ -29,6 +39,10 @@ The service validates and normalizes incoming product payloads before inserting 
 - Pub/Sub push service account is granted `roles/run.invoker`.
 - Pub/Sub push requests are verified with OIDC.
 - BigQuery inserts are split into batches to stay below request size and row count limits.
+
+## Why These GCP Services
+
+Cloud Run keeps the application small, inexpensive and suitable for the free-tier constraints while still supporting authenticated HTTPS push from Pub/Sub. Pub/Sub is the required ingestion boundary from the assignment. BigQuery is the warehouse target and stores the product events in an append-only raw table. A Pub/Sub dead-letter topic keeps invalid messages inspectable without inserting bad rows into BigQuery. Dataflow is intentionally not used because the assignment excludes it from the free-tier solution.
 
 ## Project Layout
 
@@ -112,6 +126,9 @@ MAX_RAW_PAYLOAD_BYTES=8388608
 MAX_ROWS_PER_BATCH=250
 REQUIRE_PUBSUB_OIDC=true
 PUBSUB_OIDC_SERVICE_ACCOUNT=
+GRANT_EXTERNAL_PUBLISHER=true
+REQUIRE_EXTERNAL_PUBLISHER_BINDING=true
+PYTHON_BIN=python3
 LOG_LEVEL=INFO
 ```
 
@@ -126,7 +143,7 @@ The helper script creates or updates the required GCP resources:
 - BigQuery dataset/table
 - authenticated Cloud Run service
 - OIDC settings for Pub/Sub push
-- dataset-level BigQuery IAM binding for the Cloud Run runtime service account
+- dataset-level BigQuery `WRITER` access for the Cloud Run runtime service account
 - IAM binding for the external assignment publisher service account
 
 Run:
@@ -167,7 +184,7 @@ bash bash_env.sh
 Granting the external publisher account is handled by the script through:
 
 ```bash
-EXTERNAL_PUBLISHER_SA="data-office-assignment@krampdata-office-sandbox.iam.gserviceaccount.com"
+EXTERNAL_PUBLISHER_SA="data-office-assignment@kramp-data-office-sandbox.iam.gserviceaccount.com"
 ```
 
 It grants:
@@ -177,6 +194,14 @@ roles/pubsub.publisher
 ```
 
 on the main Pub/Sub topic.
+
+The external publisher binding is required by default. For local-only smoke testing without the assignment publisher binding, override it explicitly:
+
+```bash
+PROJECT_ID="your-project-id" \
+GRANT_EXTERNAL_PUBLISHER=false \
+bash bash_env.sh
+```
 
 ## Manual Testing
 
@@ -192,6 +217,18 @@ Skip the DLQ check when only the happy path should be verified:
 
 ```bash
 PROJECT_ID="your-project-id" CHECK_DLQ=false bash smoke_test.sh
+```
+
+## Verified E2E
+
+Fill this section after running the deployed pipeline:
+
+```text
+Date:
+Project:
+Valid message id:
+BigQuery row found: yes/no
+Invalid payload routed to DLQ: yes/no
 ```
 
 Publish a valid sample message:
@@ -287,3 +324,16 @@ Usually BigQuery permission, schema mismatch, environment variable or transient 
 ## Data Model
 
 `products_raw` is append-only. The service stores every valid product event and does not update existing BigQuery rows.
+
+## Future Improvements
+
+- Manage GCP resources with Terraform for clearer infrastructure diffs and safer updates.
+- Add alerting for Cloud Run 5xx responses, Pub/Sub DLQ growth and BigQuery insert failures.
+- Add an analytical current-state view that deduplicates by product id and latest `last_update`.
+- Replace best-effort BigQuery `insertId` deduplication with an explicit idempotency table if exactly-once semantics become required.
+
+## Known Limitations
+
+- BigQuery `insertId` deduplication is best-effort, not a strict exactly-once guarantee.
+- The table is append-only; consumers that need current product state should query through a deduplicating view.
+- CI does not run the GCP smoke test because it requires project credentials and live cloud resources.

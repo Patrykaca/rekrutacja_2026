@@ -44,6 +44,19 @@ def pubsub_envelope(payload, message_id="message-1"):
     }
 
 
+def assert_rejected_without_insert(test_case, envelope, expected_detail=None):
+    operator = FakeBigQueryOperator()
+
+    with patch.object(main, "get_bq_operator", return_value=operator):
+        with test_case.assertRaises(HTTPException) as context:
+            test_case.run_pubsub(envelope)
+
+    test_case.assertEqual(context.exception.status_code, 400)
+    if expected_detail is not None:
+        test_case.assertEqual(context.exception.detail, expected_detail)
+    test_case.assertEqual(operator.calls, [])
+
+
 class PubSubEndpointTest(unittest.TestCase):
     def valid_payload(self) -> dict:
         return {
@@ -82,6 +95,18 @@ class PubSubEndpointTest(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.detail, "Missing Pub/Sub messageId")
 
+    def test_missing_message_data_is_rejected_without_insert(self):
+        envelope = pubsub_envelope(self.valid_payload())
+        del envelope["message"]["data"]
+
+        assert_rejected_without_insert(self, envelope, "Missing Pub/Sub message.data")
+
+    def test_invalid_base64_message_data_is_rejected_without_insert(self):
+        envelope = pubsub_envelope(self.valid_payload())
+        envelope["message"]["data"] = "not-base64!"
+
+        assert_rejected_without_insert(self, envelope, "Invalid base64 message.data")
+
     def test_invalid_payload_is_rejected_without_insert(self):
         operator = FakeBigQueryOperator()
         payload = self.valid_payload()
@@ -104,6 +129,15 @@ class PubSubEndpointTest(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.detail, "Payload must be valid JSON")
         self.assertEqual(operator.calls, [])
+
+    def test_non_object_json_payload_is_rejected_without_insert(self):
+        assert_rejected_without_insert(self, pubsub_envelope([]), "Payload must be a JSON object")
+
+    def test_missing_required_payload_field_is_rejected_without_insert(self):
+        payload = self.valid_payload()
+        del payload["price"]
+
+        assert_rejected_without_insert(self, pubsub_envelope(payload))
 
     def test_payload_too_large_is_rejected_before_insert(self):
         operator = FakeBigQueryOperator()

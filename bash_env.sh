@@ -17,7 +17,10 @@ export PUSH_SA_NAME="${PUSH_SA_NAME:-pubsub-push}"
 export RUN_SA="${RUN_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 export PUSH_SA="${PUSH_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 export BQ_TABLE="${PROJECT_ID}.${DATASET}.${TABLE}"
-export EXTERNAL_PUBLISHER_SA="${EXTERNAL_PUBLISHER_SA:-data-office-assignment@krampdata-office-sandbox.iam.gserviceaccount.com}"
+export EXTERNAL_PUBLISHER_SA="${EXTERNAL_PUBLISHER_SA:-data-office-assignment@kramp-data-office-sandbox.iam.gserviceaccount.com}"
+export GRANT_EXTERNAL_PUBLISHER="${GRANT_EXTERNAL_PUBLISHER:-true}"
+export REQUIRE_EXTERNAL_PUBLISHER_BINDING="${REQUIRE_EXTERNAL_PUBLISHER_BINDING:-true}"
+export PYTHON_BIN="${PYTHON_BIN:-python3}"
 export RESET_RESOURCES="${RESET_RESOURCES:-true}"
 export RESET_BIGQUERY_DATASET="${RESET_BIGQUERY_DATASET:-true}"
 export CLEAN_ARTIFACT_IMAGES="${CLEAN_ARTIFACT_IMAGES:-true}"
@@ -83,6 +86,70 @@ delete_artifact_package_if_exists() {
   fi
 }
 
+grant_external_publisher_access() {
+  local grant_output
+
+  if [[ "${GRANT_EXTERNAL_PUBLISHER}" != "true" ]]; then
+    echo "Skipping external publisher IAM grant because GRANT_EXTERNAL_PUBLISHER=${GRANT_EXTERNAL_PUBLISHER}."
+    return
+  fi
+
+  echo "Granting roles/pubsub.publisher on ${TOPIC} to ${EXTERNAL_PUBLISHER_SA}..."
+  if grant_output="$(gcloud pubsub topics add-iam-policy-binding "${TOPIC}" \
+    --project="${PROJECT_ID}" \
+    --member="serviceAccount:${EXTERNAL_PUBLISHER_SA}" \
+    --role="roles/pubsub.publisher" \
+    --quiet 2>&1)"; then
+    echo "${grant_output}"
+    return
+  fi
+
+  echo "WARNING: Could not grant roles/pubsub.publisher to ${EXTERNAL_PUBLISHER_SA}." >&2
+  echo "Verify the external publisher service account from the assignment and rerun with EXTERNAL_PUBLISHER_SA=correct-sa@project.iam.gserviceaccount.com." >&2
+
+  if [[ "${REQUIRE_EXTERNAL_PUBLISHER_BINDING}" == "true" ]]; then
+    echo "${grant_output}" >&2
+    exit 1
+  fi
+}
+
+grant_bigquery_dataset_writer_access() {
+  local dataset_ref="${PROJECT_ID}:${DATASET}"
+  local current_metadata
+  local updated_metadata
+
+  current_metadata="$(mktemp)"
+  updated_metadata="$(mktemp)"
+
+  bq show --project_id="${PROJECT_ID}" --format=prettyjson "${dataset_ref}" >"${current_metadata}"
+
+  "${PYTHON_BIN}" - "${current_metadata}" "${updated_metadata}" "${RUN_SA}" <<'PY'
+import json
+import sys
+
+source_path, target_path, service_account = sys.argv[1:]
+
+with open(source_path, encoding="utf-8") as source_file:
+    dataset = json.load(source_file)
+
+access_entries = dataset.setdefault("access", [])
+writer_entry = {
+    "role": "WRITER",
+    "userByEmail": service_account,
+}
+
+if writer_entry not in access_entries:
+    access_entries.append(writer_entry)
+
+with open(target_path, "w", encoding="utf-8") as target_file:
+    json.dump(dataset, target_file)
+PY
+
+  bq update --project_id="${PROJECT_ID}" --source="${updated_metadata}" "${dataset_ref}"
+
+  rm -f "${current_metadata}" "${updated_metadata}"
+}
+
 if [[ "${RESET_RESOURCES}" == "true" ]]; then
   echo "Resetting existing GCP resources for ${SERVICE}..."
   delete_subscription_if_exists "${SUBSCRIPTION}"
@@ -122,11 +189,7 @@ if ! gcloud pubsub topics describe "${TOPIC}" --project="${PROJECT_ID}" >/dev/nu
   gcloud pubsub topics create "${TOPIC}" --project="${PROJECT_ID}"
 fi
 
-gcloud pubsub topics add-iam-policy-binding "${TOPIC}" \
-  --project="${PROJECT_ID}" \
-  --member="serviceAccount:${EXTERNAL_PUBLISHER_SA}" \
-  --role="roles/pubsub.publisher" \
-  --quiet
+grant_external_publisher_access
 
 if ! gcloud pubsub topics describe "${DLQ_TOPIC}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   gcloud pubsub topics create "${DLQ_TOPIC}" --project="${PROJECT_ID}"
@@ -162,17 +225,15 @@ CREATE TABLE IF NOT EXISTS \`${BQ_TABLE}\` (
 );
 SQL
 
-bq --project_id="${PROJECT_ID}" add-iam-policy-binding \
-  --member="serviceAccount:${RUN_SA}" \
-  --role="roles/bigquery.dataEditor" \
-  "${PROJECT_ID}:${DATASET}"
+grant_bigquery_dataset_writer_access
 
 gcloud run deploy "${SERVICE}" \
   --source . \
   --region="${REGION}" \
   --service-account="${RUN_SA}" \
   --no-allow-unauthenticated \
-  --set-env-vars="PROJECT_ID=${PROJECT_ID},PUBSUB_TOPIC=${TOPIC},BQ_DATASET=${DATASET},BQ_TABLE=${BQ_TABLE},REQUIRE_PUBSUB_OIDC=false,LOG_LEVEL=INFO,BQ_TIMEOUT=30,MAX_REQUEST_BYTES=9437184,MAX_RAW_PAYLOAD_BYTES=8388608,MAX_ROWS_PER_BATCH=250"
+  --set-env-vars="PROJECT_ID=${PROJECT_ID},PUBSUB_TOPIC=${TOPIC},BQ_DATASET=${DATASET},BQ_TABLE=${BQ_TABLE},REQUIRE_PUBSUB_OIDC=false,LOG_LEVEL=INFO,BQ_TIMEOUT=30,MAX_REQUEST_BYTES=9437184,MAX_RAW_PAYLOAD_BYTES=8388608,MAX_ROWS_PER_BATCH=250" \
+  --quiet
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE}" \
   --region="${REGION}" \
@@ -180,7 +241,8 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE}" \
 
 gcloud run services update "${SERVICE}" \
   --region="${REGION}" \
-  --update-env-vars="REQUIRE_PUBSUB_OIDC=true,PUBSUB_OIDC_AUDIENCE=${SERVICE_URL},PUBSUB_OIDC_SERVICE_ACCOUNT=${PUSH_SA}"
+  --update-env-vars="REQUIRE_PUBSUB_OIDC=true,PUBSUB_OIDC_AUDIENCE=${SERVICE_URL},PUBSUB_OIDC_SERVICE_ACCOUNT=${PUSH_SA}" \
+  --quiet
 
 gcloud run services add-iam-policy-binding "${SERVICE}" \
   --region="${REGION}" \
